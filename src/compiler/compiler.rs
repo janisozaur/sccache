@@ -35,6 +35,7 @@ use crate::dist::pkg;
 use crate::lru_disk_cache;
 use crate::mock_command::{CommandChild, CommandCreatorSync, RunCommand, exit_status};
 use crate::server;
+use crate::trace;
 use crate::util::{
     Digest, StderrLineObserver, fmt_duration_as_secs, resolve_compiler_avoiding_wrapper,
     run_input_output, run_input_output_observing,
@@ -220,6 +221,8 @@ impl CompileCommandImpl for SingleCompileCommand {
         if *share_jobserver {
             cmd.share_jobserver();
         }
+        let mut span = trace::span("tool: compile");
+        span.arg("executable", resolved_executable.display().to_string());
         match service.notification_tx() {
             Some(tx) => {
                 let tx = tx.clone();
@@ -608,6 +611,7 @@ where
             } else if cache_control == CacheControl::ForceRecache {
                 Ok(Cache::Recache)
             } else {
+                let _span = trace::span(format!("storage: {} get", storage.cache_type_name()));
                 storage.get(&key).await
             }
         };
@@ -820,6 +824,7 @@ where
                 // entry. We'll get the result back elsewhere.
                 let future = async move {
                     let start = Instant::now();
+                    let _span = trace::span(format!("storage: {} put", storage.cache_type_name()));
                     match storage.put(&key, entry).await {
                         Ok(_) => {
                             debug!("[{}]: Stored in cache successfully!", out_pretty2);

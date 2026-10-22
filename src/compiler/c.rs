@@ -25,6 +25,7 @@ use crate::dist;
 #[cfg(feature = "dist-client")]
 use crate::dist::pkg;
 use crate::mock_command::CommandCreatorSync;
+use crate::trace;
 use crate::util::{
     Digest, HashToDigest, MetadataCtimeExt, TimeMacroFinder, Timestamp, decode_path, encode_path,
     hash_all, strip_basedirs, strip_basedirs_from_arg,
@@ -558,19 +559,22 @@ where
                 }
             }
 
-            let result = self
-                .compiler
-                .preprocess(
-                    creator,
-                    &self.executable,
-                    &self.parsed_args,
-                    &cwd,
-                    &env_vars,
-                    may_dist,
-                    rewrite_includes_only,
-                    use_preprocessor_cache_mode,
-                )
-                .await;
+            let result = {
+                let mut span = trace::span("tool: preprocess");
+                span.arg("executable", self.executable.display().to_string());
+                self.compiler
+                    .preprocess(
+                        creator,
+                        &self.executable,
+                        &self.parsed_args,
+                        &cwd,
+                        &env_vars,
+                        may_dist,
+                        rewrite_includes_only,
+                        use_preprocessor_cache_mode,
+                    )
+                    .await
+            };
             let out_pretty = self.parsed_args.output_pretty().into_owned();
             let result = result.map_err(|e| {
                 debug!("[{}]: preprocessor failed: {:?}", out_pretty, e);
@@ -619,6 +623,7 @@ where
             // Remember include files needed in this preprocessing step
             let mut include_files = HashMap::new();
             if preprocessor_key.is_some() {
+                let _span = trace::span("parse_preprocessor_includes");
                 // TODO how to propagate stats and which stats?
                 if !process_preprocessed_file(
                     &absolute_input_path,
