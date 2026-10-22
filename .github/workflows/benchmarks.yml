@@ -3,17 +3,21 @@ name: Benchmarks
 # spell-checker:ignore codspeed dtolnay Swatinem
 
 on:
-  pull_request:
   push:
     branches:
-      - '*'
+      - main
+  pull_request:
+  # `workflow_dispatch` allows CodSpeed to trigger backtest
+  # performance analysis in order to generate initial data.
+  workflow_dispatch:
 
 permissions:
   contents: read # to fetch code (actions/checkout)
+  id-token: write # for OpenID Connect authentication with CodSpeed
 
 # End the current execution if there is a new changeset in the PR.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -21,6 +25,7 @@ jobs:
     name: Run ${{ matrix.mode }} benchmarks (CodSpeed)
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         mode:
           - simulation
@@ -33,6 +38,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: codspeed-${{ matrix.mode }}
 
       - name: Install cargo-codspeed
         shell: bash
@@ -40,13 +47,10 @@ jobs:
 
       - name: Build benchmarks
         shell: bash
-        run: cargo codspeed build
+        run: cargo codspeed build -m ${{ matrix.mode }}
 
       - name: Run benchmarks
-        uses: CodSpeedHQ/action@v4
-        env:
-          CODSPEED_LOG: debug
+        uses: CodSpeedHQ/action@v5
         with:
           mode: ${{ matrix.mode }}
-          run: cargo codspeed run > /dev/null
-          token: ${{ secrets.CODSPEED_TOKEN }}
+          run: cargo codspeed run
