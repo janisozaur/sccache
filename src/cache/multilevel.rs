@@ -372,6 +372,24 @@ impl MultiLevelStorage {
         MultiLevelStats(self.atomic_stats.iter().map(|s| s.snapshot()).collect())
     }
 
+    /// Snapshot each level's counters onto the metrics track so Perfetto
+    /// draws a time-series per level.
+    fn emit_tier_counters(&self) {
+        for level in self.stats().0 {
+            trace::counter(
+                format!("Tier {}", level.name),
+                &[
+                    ("hits", level.hits),
+                    ("misses", level.misses),
+                    ("writes", level.writes),
+                    ("write_failures", level.write_failures),
+                    ("backfills_from", level.backfills_from),
+                    ("backfills_to", level.backfills_to),
+                ],
+            );
+        }
+    }
+
     /// Create a multi-level storage from configuration.
     ///
     /// Returns None if no levels are configured (SCCACHE_MULTILEVEL_CHAIN not set).
@@ -600,6 +618,8 @@ impl Storage for MultiLevelStorage {
                         );
                     }
 
+                    self.emit_tier_counters();
+
                     return Ok(Cache::Hit(entry));
                 }
                 Ok(Cache::Miss) => {
@@ -621,6 +641,7 @@ impl Storage for MultiLevelStorage {
         debug!("Cache miss at all levels");
 
         self.record_all_read_misses();
+        self.emit_tier_counters();
 
         Ok(Cache::Miss)
     }
@@ -660,7 +681,7 @@ impl Storage for MultiLevelStorage {
 
         let key_str = key.to_string();
 
-        match self.write_error_policy {
+        let result = match self.write_error_policy {
             WriteErrorPolicy::Ignore => {
                 // Never fail, log warnings only
                 self.write_remaining_levels_async(&key_str, &data, 0).await;
@@ -770,7 +791,9 @@ impl Storage for MultiLevelStorage {
 
                 Ok(Duration::ZERO)
             }
-        }
+        };
+        self.emit_tier_counters();
+        result
     }
 
     async fn check(&self) -> Result<CacheMode> {
