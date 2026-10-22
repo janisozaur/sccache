@@ -19,8 +19,11 @@ use crate::compiler::{ColorMode, is_rmeta_artifact_notification};
 use crate::config::Config;
 use crate::jobserver::Client;
 use crate::mock_command::{CommandChild, CommandCreatorSync, ProcessCommandCreator, RunCommand};
-use crate::protocol::{Compile, CompileFinished, CompileResponse, Request, Response};
+use crate::protocol::{
+    Compile, CompileFinished, CompileResponse, RecordStatsPayload, Request, Response,
+};
 use crate::server::{self, DistInfo, ServerInfo, ServerStartup, ServerStats};
+use crate::trace;
 use crate::util::{daemonize, new_client_runtime, run_input_output};
 use byteorder::{BigEndian, ByteOrder};
 use fs::{File, OpenOptions};
@@ -772,10 +775,17 @@ where
         stdout,
         stderr,
     )?;
-    // Ship accumulated stats back to the daemon (best-effort; don't fail the build on error).
+    // Ship accumulated stats and captured trace events back to the daemon
+    // (best-effort; don't fail the build on error).
     let delta: ServerStats = runtime.block_on(service.take_stats());
     if let Ok(mut conn) = conn_arc.lock() {
-        let _ = conn.request(Request::RecordStats(Box::new(delta)));
+        let now_us = trace::global().map(trace::Tracer::now_us).unwrap_or(0.0);
+        let payload = RecordStatsPayload {
+            stats: delta,
+            events: trace::drain_trace(),
+            client_now_us: now_us,
+        };
+        let _ = conn.request(Request::RecordStats(Box::new(payload)));
     }
     Ok(exit_code)
 }
@@ -1000,6 +1010,14 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             let jobserver = Client::new();
             let conn = connect_or_start_server(&get_addr(), startup_timeout)?;
             if config.client_side_mode {
+                // Events are captured in memory and forwarded to the daemon,
+                // which writes them to its trace file; the client creates no
+                // file itself.
+                if config.trace_file.is_some()
+                    && let Err(e) = trace::init_memory()
+                {
+                    warn!("client-side tracing disabled: {e:#}");
+                }
                 // Under make -jN each CLI process gets only 2 worker threads;
                 // one for preprocessing/compilation and one for IPC.  The
                 // blocking thread pool absorbs zstd/zip work.
