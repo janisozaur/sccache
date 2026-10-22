@@ -4,6 +4,7 @@
 ![Crates.io](https://img.shields.io/crates/l/sccache)
 
 [![CodeCov](https://codecov.io/gh/mozilla/sccache/branch/main/graph/badge.svg)](https://codecov.io/gh/mozilla/sccache)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/janisozaur/sccache?utm_source=badge)
 
 
 sccache - Shared Compilation Cache
