@@ -39,6 +39,7 @@ fn test_server_port_in_use() {
 #[cfg(not(target_os = "macos"))]
 fn run_traced_server(
     dir: &std::path::Path,
+    extra_env: &[(String, String)],
     run: impl FnOnce(&dyn Fn(&[&str]) -> std::process::Output),
 ) -> Vec<serde_json::Value> {
     let trace_file = dir.join("trace.json");
@@ -49,15 +50,17 @@ fn run_traced_server(
         .port()
         .to_string();
     let sccache = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_sccache"))
+        let cmd = Command::new(env!("CARGO_BIN_EXE_sccache"))
             .args(args)
             .current_dir(dir)
             .env("SCCACHE_SERVER_PORT", &port)
             .env("SCCACHE_DIR", dir.join("cache"))
             .env("SCCACHE_TRACE", &trace_file)
-            .env_remove("SCCACHE_SERVER_UDS")
-            .output()
-            .unwrap()
+            .env_remove("SCCACHE_SERVER_UDS");
+        for (key, val) in extra_env {
+            cmd.env(key, val);
+        }
+        cmd.output().unwrap()
     };
 
     let output = sccache(&["--start-server"]);
@@ -147,7 +150,7 @@ fn test_server_writes_trace_file(compile: bool) {
     )
     .unwrap();
     std::fs::create_dir(tempdir.path().join("out")).unwrap();
-    let events = run_traced_server(tempdir.path(), |sccache| {
+    let events = run_traced_server(tempdir.path(), &[], |sccache| {
         if !compile {
             return;
         }
@@ -217,7 +220,7 @@ fn test_server_traces_preprocessor_cache() {
         "#include \"trace_me.h\"\nint main(void) { return trace_me(); }\n",
     )
     .unwrap();
-    let events = run_traced_server(tempdir.path(), |sccache| {
+    let events = run_traced_server(tempdir.path(), &[], |sccache| {
         for _ in 0..2 {
             let output = sccache(&["cc", "-c", "trace_me.c", "-o", "trace_me.o"]);
             assert!(output.status.success(), "{output:?}");
@@ -293,7 +296,7 @@ fn test_server_traces_storage() {
     )
     .unwrap();
     std::fs::create_dir(tempdir.path().join("out")).unwrap();
-    let events = run_traced_server(tempdir.path(), |sccache| {
+    let events = run_traced_server(tempdir.path(), &[], |sccache| {
         for _ in 0..2 {
             let output = sccache(&[
                 "rustc",
@@ -342,7 +345,7 @@ fn test_server_traces_counters() {
     )
     .unwrap();
     std::fs::create_dir(tempdir.path().join("out")).unwrap();
-    let events = run_traced_server(tempdir.path(), |sccache| {
+    let events = run_traced_server(tempdir.path(), &[], |sccache| {
         for _ in 0..2 {
             let output = sccache(&[
                 "rustc",
@@ -371,4 +374,55 @@ fn test_server_traces_counters() {
     assert_eq!(last["args"]["hits"].as_u64().unwrap(), 1, "{events:?}");
     assert_eq!(last["args"]["misses"].as_u64().unwrap(), 1, "{events:?}");
     assert_eq!(last["args"]["errors"].as_u64().unwrap(), 0, "{events:?}");
+}
+
+#[test]
+#[serial]
+#[cfg(not(target_os = "macos"))]
+fn test_server_traces_client_side_mode() {
+    let tempdir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tempdir.path().join("trace_me.rs"),
+        "pub fn trace_me() -> u32 { 0 }\n",
+    )
+    .unwrap();
+    std::fs::create_dir(tempdir.path().join("out")).unwrap();
+    let events = run_traced_server(tempdir.path(), &[("SCCACHE_CLIENT_SIDE", "1")], |sccache| {
+        let output = sccache(&[
+            "rustc",
+            "--crate-name",
+            "trace_me",
+            "--crate-type",
+            "lib",
+            "--emit=link",
+            "--out-dir=out",
+            "trace_me.rs",
+        ]);
+        assert!(output.status.success(), "{output:?}");
+    });
+
+    // The pipeline ran in the client process; the daemon replayed its events
+    // on the dedicated client track.
+    let compiles = compile_spans(&events);
+    assert_eq!(compiles.len(), 1, "{events:?}");
+    assert_eq!(compiles[0]["pid"], 3, "{events:?}");
+    assert_eq!(compiles[0]["args"]["result"], "Miss", "{events:?}");
+    for name in ["tool: detect_compiler", "tool: compile", "storage: ipc get"] {
+        assert_eq!(
+            spans_within(&events, name, compiles[0]).len(),
+            1,
+            "{events:?}"
+        );
+    }
+    assert_eq!(
+        spans_within(&events, "storage: ipc put", compiles[0]).len(),
+        1,
+        "{events:?}",
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e["ph"] == "M" && e["name"] == "process_name" && e["pid"] == 3),
+        "{events:?}",
+    );
 }

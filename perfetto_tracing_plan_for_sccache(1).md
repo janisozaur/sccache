@@ -184,7 +184,7 @@ Uncommitted at the time of writing: commit 4 (`tool: detect_compiler`, `tool: pr
 
 ### 4.4 Open items
 
-- Commit 7 (client-side forwarding) is not started.
+- Commit 7 (client-side forwarding): test written (`test_server_traces_client_side_mode` in `tests/server.rs`); implementation not started, so the test fails until commit 7 lands.
 - The `scan_file` volume question above is unresolved.
 - Rustc detection repeats on every request.
 - `src/lsp_probe.rs` is untracked and not part of this work.
