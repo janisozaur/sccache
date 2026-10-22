@@ -428,6 +428,35 @@ thread_local! {
     static PANIC_LOCATION: Cell<Option<(String, u32, u32)>> = const { Cell::new(None) };
 }
 
+/// Replays trace events forwarded by a client-side process onto the daemon's
+/// trace file. The client ran with its own tracer epoch, so its timestamps
+/// are rebased to end when the daemon receives them; all events move to the
+/// dedicated client track. The client's own `process_name` metadata is
+/// dropped, it would relabel the daemon's tracks.
+fn record_client_trace(events: &[u8], client_now_us: f64) {
+    let Some(tracer) = trace::global() else {
+        return;
+    };
+    let json = String::from_utf8_lossy(events);
+    let events: Vec<trace::TraceEvent> = match serde_json::from_str(&json) {
+        Ok(events) => events,
+        Err(e) => {
+            debug!("failed to parse client-side trace events: {e}");
+            return;
+        }
+    };
+    let offset = tracer.now_us() - client_now_us;
+    for event in events {
+        if event.ph == trace::Phase::Metadata && event.name == "process_name" {
+            continue;
+        }
+        let mut event = event.clone();
+        event.pid = trace::PID_CLIENT;
+        event.ts += offset;
+        tracer.emit(&event);
+    }
+}
+
 /// Start an sccache server, listening on `addr`.
 ///
 /// Spins an event loop handling client connections until a client
@@ -1017,9 +1046,10 @@ where
                         result,
                     )))
                 }
-                Request::RecordStats(delta) => {
+                Request::RecordStats(payload) => {
                     debug!("handle_client: record_stats");
-                    me.merge_stats(*delta).await;
+                    me.merge_stats(payload.stats).await;
+                    record_client_trace(&payload.events, payload.client_now_us);
                     Ok(Message::WithoutBody(Response::RecordStats))
                 }
             }

@@ -90,9 +90,9 @@ Perfetto natively ingests the **Chrome Trace Event Format (JSON Array Format)** 
 
 **Goal:** Propagate trace data from `SCCACHE_CLIENT_SIDE=1` CLI processes to the daemon trace file.
 
-- [ ] **Client-Side Mode Forwarding (`src/protocol.rs`, `src/server.rs`)**
-  - [ ] Extend `Request::RecordStats` to capture events produced during client-side execution.
-  - [ ] In `SccacheService::merge_stats`, drain received events and write them to the central trace file under dedicated client tracks.
+- [x] **Client-Side Mode Forwarding (`src/protocol.rs`, `src/server.rs`)**
+  - [x] Extend `Request::RecordStats` to capture events produced during client-side execution. (`RecordStatsPayload { stats, events: Vec<u8>, client_now_us }`; events travel as raw JSON bytes because bincode cannot deserialize serde_json `Value` args maps.)
+  - [x] Drain received events and write them to the central trace file under dedicated client tracks. (`record_client_trace` in `src/server.rs`, called next to `merge_stats`: parses with serde_json, rebases the client clock so its timeline ends at daemon receipt, moves all events to `pid: 3` "sccache Client-Side", drops the client's own `process_name` metadata. Client side: `trace::init_memory()` in `src/commands.rs` captures into a `MemorySink`, `trace::drain_trace()` forwards it.)
 
 ---
 
@@ -184,7 +184,7 @@ Uncommitted at the time of writing: commit 4 (`tool: detect_compiler`, `tool: pr
 
 ### 4.4 Open items
 
-- Commit 7 (client-side forwarding): test written (`test_server_traces_client_side_mode` in `tests/server.rs`); implementation not started, so the test fails until commit 7 lands.
+- (none for commit 7; client-side events now replay on `pid: 3`)
 - The `scan_file` volume question above is unresolved.
 - Rustc detection repeats on every request.
 - `src/lsp_probe.rs` is untracked and not part of this work.

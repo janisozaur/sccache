@@ -39,7 +39,7 @@ fn test_server_port_in_use() {
 #[cfg(not(target_os = "macos"))]
 fn run_traced_server(
     dir: &std::path::Path,
-    extra_env: &[(String, String)],
+    extra_env: &[(&str, &str)],
     run: impl FnOnce(&dyn Fn(&[&str]) -> std::process::Output),
 ) -> Vec<serde_json::Value> {
     let trace_file = dir.join("trace.json");
@@ -50,8 +50,8 @@ fn run_traced_server(
         .port()
         .to_string();
     let sccache = |args: &[&str]| {
-        let cmd = Command::new(env!("CARGO_BIN_EXE_sccache"))
-            .args(args)
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_sccache"));
+        cmd.args(args)
             .current_dir(dir)
             .env("SCCACHE_SERVER_PORT", &port)
             .env("SCCACHE_DIR", dir.join("cache"))
@@ -407,13 +407,20 @@ fn test_server_traces_client_side_mode() {
     assert_eq!(compiles.len(), 1, "{events:?}");
     assert_eq!(compiles[0]["pid"], 3, "{events:?}");
     assert_eq!(compiles[0]["args"]["result"], "Miss", "{events:?}");
-    for name in ["tool: detect_compiler", "tool: compile", "storage: ipc get"] {
+    for name in ["tool: compile", "storage: ipc get"] {
         assert_eq!(
             spans_within(&events, name, compiles[0]).len(),
             1,
             "{events:?}"
         );
     }
+    // Detection runs before the root span, on the same client track.
+    assert!(
+        events
+            .iter()
+            .any(|e| e["ph"] == "X" && e["name"] == "tool: detect_compiler" && e["pid"] == 3),
+        "{events:?}",
+    );
     assert_eq!(
         spans_within(&events, "storage: ipc put", compiles[0]).len(),
         1,

@@ -39,6 +39,8 @@ pub const PID_METRICS: u32 = 0;
 pub const PID_WORKERS: u32 = 1;
 /// Work not tied to a request, e.g. multi-level cache backfills.
 pub const PID_BACKGROUND: u32 = 2;
+/// A client-side mode run, replayed by the daemon onto this track.
+pub const PID_CLIENT: u32 = 3;
 
 static TRACER: OnceLock<Tracer> = OnceLock::new();
 
@@ -222,6 +224,7 @@ impl Tracer {
             (PID_METRICS, "sccache Metrics"),
             (PID_WORKERS, "sccache Workers"),
             (PID_BACKGROUND, "sccache Async Background & Backfill"),
+            (PID_CLIENT, "sccache Client-Side"),
         ] {
             tracer.emit(&TraceEvent::metadata("process_name", pid, 0, label));
         }
@@ -394,6 +397,56 @@ pub fn init(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Writer that keeps the JSON in memory, for client-side mode: the events
+/// are forwarded to the daemon instead of written to a file.
+#[derive(Clone, Default)]
+pub struct MemorySink {
+    buf: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Write for MemorySink {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        lock(&self.buf).extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl MemorySink {
+    fn contents(&self) -> Vec<u8> {
+        lock(&self.buf).clone()
+    }
+}
+
+static CLIENT_SINK: OnceLock<MemorySink> = OnceLock::new();
+
+/// Enables in-memory tracing for a client-side process: no file is created,
+/// the events are handed to the daemon by [`drain_trace`] instead.
+pub fn init_memory() -> Result<()> {
+    let sink = MemorySink::default();
+    let tracer = Tracer::new(sink.clone()).with_context(|| "failed to start tracing")?;
+    if TRACER.set(tracer).is_err() {
+        bail!("tracing is already initialized");
+    }
+    let _ = CLIENT_SINK.set(sink);
+    Ok(())
+}
+
+/// Terminates the in-memory trace and returns the captured events as a JSON
+/// array, for forwarding to the daemon in client-side mode. Raw bytes rather
+/// than parsed events: bincode cannot carry the heterogeneous `args` maps.
+/// Empty if the process did not initialize client-side tracing.
+pub fn drain_trace() -> Vec<u8> {
+    let Some(sink) = CLIENT_SINK.get() else {
+        return Vec::default();
+    };
+    finish();
+    sink.contents()
+}
+
 pub fn global() -> Option<&'static Tracer> {
     TRACER.get()
 }
@@ -533,7 +586,7 @@ mod test {
                 .filter(|e| e.name == "process_name")
                 .map(|e| e.pid)
                 .collect::<Vec<_>>(),
-            [PID_METRICS, PID_WORKERS, PID_BACKGROUND]
+            [PID_METRICS, PID_WORKERS, PID_BACKGROUND, PID_CLIENT]
         );
         assert!(meta.iter().any(|e| e.name == "thread_name"
             && e.pid == PID_WORKERS
@@ -620,5 +673,28 @@ mod test {
             })
             .await;
         assert_eq!(seen, (Some(ctx), None));
+    }
+
+    #[test]
+    fn memory_sink_round_trips_events() {
+        let sink = MemorySink::default();
+        let tracer = Tracer::new(sink.clone()).unwrap();
+        let guard = tracer.span("client span");
+        drop(guard);
+        tracer.finish();
+        let contents = sink.contents();
+        let events: Vec<TraceEvent> = serde_json::from_slice(&contents).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.ph == Phase::Complete && e.name == "client span"),
+            "{events:?}",
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.ph == Phase::Metadata && e.pid == PID_CLIENT),
+            "{events:?}",
+        );
     }
 }

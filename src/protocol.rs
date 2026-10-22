@@ -33,8 +33,21 @@ pub enum Request {
     StorageGetPreprocessorEntry { key: String },
     /// Store or overwrite the preprocessor cache entry for `key`.
     StoragePutPreprocessorEntry { key: String, entry_bytes: Vec<u8> },
-    /// Merge per-invocation stats into the daemon's running totals.
-    RecordStats(Box<ServerStats>),
+    /// Merge per-invocation stats and replay captured trace events.
+    RecordStats(Box<RecordStatsPayload>),
+}
+
+/// What a client-side process reports to the daemon on `RecordStats`.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RecordStatsPayload {
+    pub stats: ServerStats,
+    /// Trace events captured in this process, as a JSON array; the daemon
+    /// parses them with serde_json because bincode cannot carry the
+    /// heterogeneous `args` maps.
+    pub events: Vec<u8>,
+    /// Microseconds since this process' tracer was created, at send time;
+    /// the daemon rebases the client timeline onto its own clock with it.
+    pub client_now_us: f64,
 }
 
 /// A server response.
@@ -126,4 +139,35 @@ pub struct StorageHandshakeInfo {
     pub preprocessor_cache_mode_config: PreprocessorCacheModeConfig,
     pub cache_mode: CacheMode,
     pub max_size: Option<u64>,
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::server::ServerStats;
+    use crate::trace::*;
+    use bincode::{deserialize, serialize};
+    use serde_json::from_str;
+
+    #[test]
+    fn test_record_stats_payload_bincode_roundtrip() {
+        let payload = RecordStatsPayload {
+            stats: ServerStats::default(),
+            events: b"[{\"name\":\"compile: x\",\"ph\":\"X\",\"ts\":1.0,\"pid\":1,\"tid\":1,\"dur\":2.0}]".to_vec(),
+            client_now_us: 12.5,
+        };
+        let bytes = serialize(&Request::RecordStats(Box::new(payload))).unwrap();
+        let back = deserialize(&bytes).unwrap();
+        match back {
+            Request::RecordStats(roundtripped) => {
+                assert_eq!(roundtripped.client_now_us, 12.5);
+                let json = String::from_utf8(roundtripped.events).unwrap();
+                let events: Vec<TraceEvent> = from_str(&json).unwrap();
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].name, "compile: x");
+                assert_eq!(events[0].dur, Some(2.0));
+            }
+            other => panic!("unexpected {:?}", other),
+        }
+    }
 }
